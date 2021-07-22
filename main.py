@@ -3,16 +3,19 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import html, click
 import concurrent.futures as cf
+import logging
+
+logger = logging.getLogger(__name__)
 
 @click.command()
 @click.option('--ytheaders', priompt='Paste YouTube Music request headers:',
     help='YouTube Music request headers. Obtain these by using Chrome to navigate to YouTube Music. Open Developer Tools in Options -> More Tools. Refresh the page. In developer tools, click network and filter results by "/browse". In the headers tab, scroll to the section "Request headers" and copy everything starting from "accept: */*" to the end of the section.')
 @click.option('--spotify_client_id', default='', help='Sign up for a spotify developer account, create a new app, this will be the client-id from that app.')
 @click.option('--spotify_client_secret', default='', help='Similar to "--spotify-client-id", this will be the client-secret from that app.')
-@click.option('--spotify', default=True, help='Set to False to disable syncing to Spotify. Default: True')
-@click.option('--ytmusic', default=True, help='Set to False to disable syncing to YouTube Music. Default: True')
+@click.option('--spotify/--no-spotify', default=True, help='Controls if Spotify will be synced to. Default: True')
+@click.option('--ytmusic/--no-ytmusic', default=True, help='Controls if YouTube Music will be synced to. Default: True')
 @click.option('--sync_target', default='albums', help='Targets item types to sync. Currently supported are albums, songs, and playlists. Multiple instances of this command are allowed.')
-@click.option('--threads', default=5, help='Advanced Command. Specifies the number of sub-threads to use when fetching items and syncing.')
+@click.option('--threads', default=5, help='Advanced Command. Specifies the number of async-threads to use when fetching items and syncing.')
 
 class Album:
     def __init__(self, item, platform) -> None:
@@ -97,10 +100,11 @@ class Spotube:
                 scope="user-library-modify,user-library-read"
             )
         )
+        logger.info("Spotube initialized.")
         pass
 
     def _paginationHelper(self, spotifyFunction):
-        results = spotifyFunction
+        results = spotifyFunction()
         albums = results['items']
         while results['next']:
             results = self._sp.next(results)
@@ -114,15 +118,18 @@ class Spotube:
                     ('name' in item.keys() and _item.getTitle() == item['name'])):
                     for artist in item['artists']:
                         if artist['name'] in _item.getArtists():
+                            logger.info("Album: {} already exists on {}. Updating with {}.".format(item, _item.getPlatforms(), platform))
                             _item.setPlatform(platform)
                             return True
             return False
         if not exists():
+            logger.info("Album: {} Platform: {} does not exist locally. Adding to process stack.".format(item, platform))
             self._items.append(
                 Album(item, platform)
             )
 
     def _ytmAddAlbum(self, title, artists):
+        logger.info("Adding album {} to YouTube Music.".format(title))
         for album in self._ytm.search(query=title, filter="albums", limit=50):
             for artist in album['artists']:
                 if artist['name'] in artists:
@@ -134,6 +141,7 @@ class Spotube:
                     return
 
     def _spotifyAddAlbum(self, title, artists):
+        logger.info("Adding album {} to Spotify.".format(title))
         for album in self._sp.search(type="album", q=html.escape(title), limit=50)['albums']['items']:
             for artist in album['artists']:
                 if artist['name'] in artists:
@@ -143,6 +151,7 @@ class Spotube:
     def sync(self, spotify, ytmusic, sync_target, threads):
         with cf.ThreadPoolExecutor(max_workers=threads) as executor:
             if 'albums' in sync_target:
+                logger.info("Processing albums...")
                 for album in self._paginationHelper(self._sp.current_user_saved_albums()):
                     executor.submit(self._processAlbum, album['album'], "spotify")
                 for album in self._ytm.get_library_albums(limit=1000):
