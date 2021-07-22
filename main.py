@@ -1,20 +1,18 @@
 from ytmusicapi import YTMusic
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+import html, click
 
-import html
+@click.command()
+@click.option('--ytheaders', priompt='Paste YouTube Music request headers:',
+    help='YouTube Music request headers. Obtain these by using Chrome to navigate to YouTube Music. Open Developer Tools in Options -> More Tools. Refresh the page. In developer tools, click network and filter results by "/browse". In the headers tab, scroll to the section "Request headers" and copy everything starting from "accept: */*" to the end of the section.')
+@click.option('--spotify_client_id', default='', help='Sign up for a spotify developer account, create a new app, this will be the client-id from that app.')
+@click.option('--spotify_client_secret', default='', help='Similar to "--spotify-client-id", this will be the client-secret from that app.')
+@click.option('--spotify', default=True, help='Set to False to disable syncing to Spotify. Default: True')
+@click.option('--ytmusic', default=True, help='Set to False to disable syncing to YouTube Music. Default: True')
+@click.option('--sync_target', default='albums', help='Targets item types to sync. Currently supported are albums, songs, and playlists. Multiple instances of this command are allowed.')
 
-ytmusic = YTMusic(YTMusic.setup())
-
-sp = spotipy.Spotify(
-        auth_manager=SpotifyOAuth(
-            client_id=input("Spotify Client ID: "),
-            client_secret=input("Spotify Client Secret: "),
-            redirect_uri="http://localhost:8080",
-            scope="user-library-modify,user-library-read")
-    )
-
-class Item:
+class Album:
     def __init__(self, item, platform) -> None:
         self._title = ""
         self._artists = []
@@ -50,12 +48,29 @@ class Item:
         elif platform == "spotify":
             self._platform['spotify'] = True
 
-class Items:
-    def __init__(self) -> None:
+class Spotube:
+    def __init__(self, ytheaders, spotify_client_id, spotify_client_secret) -> None:
         self._items = []
+        self._ytm = YTMusic(ytheaders)
+        self._sp = spotipy.Spotify(
+            auth_manager=SpotifyOAuth(
+                client_id=spotify_client_id,
+                client_secret=spotify_client_secret,
+                redirect_uri="http://localhost:8080",
+                scope="user-library-modify,user-library-read"
+            )
+        )
         pass
 
-    def processAlbum(self, item, platform):
+    def _paginationHelper(self, spotifyFunction):
+        results = spotifyFunction
+        albums = results['items']
+        while results['next']:
+            results = self._sp.next(results)
+            albums.extend(results['items'])
+        return albums
+
+    def _processAlbum(self, item, platform):
         def exists():
             for _item in self._items:
                 if (('title' in item.keys() and _item.getTitle() == item['title']) or
@@ -67,54 +82,45 @@ class Items:
             return False
         if not exists():
             self._items.append(
-                Item(item, platform)
+                Album(item, platform)
             )
 
-    def sync(self, ytCallback, spotifyCallback):
-        for _item in self._items:
-            if not _item.getPlatforms()['ytmusic']:
-                ytCallback(_item.getTitle(), _item.getArtists())
-            elif not _item.getPlatforms()['spotify']:
-                spotifyCallback(_item.getTitle(), _item.getArtists())
-    
-    def getItems(self):
-        return self._items
-
-def main():
-    items = Items()
-
-    def current_user_saved_albums():
-        results = sp.current_user_saved_albums()
-        albums = results['items']
-        while results['next']:
-            results = sp.next(results)
-            albums.extend(results['items'])
-        return albums
-
-    for album in current_user_saved_albums():
-        items.processAlbum(album['album'], "spotify")
-
-    for album in ytmusic.get_library_albums(limit=1000):
-        items.processAlbum(album, "ytmusic")
-
-    def ytAdd(title, artists):
-        for album in ytmusic.search(query=title, filter="albums", limit=50):
+    def _ytmAddAlbum(self, title, artists):
+        for album in self._ytm.search(query=title, filter="albums", limit=50):
             for artist in album['artists']:
                 if artist['name'] in artists:
-                    ytmusic.rate_playlist(
-                        ytmusic.get_album(album['browseId'])['playlistId'], 'LIKE'
+                    self._ytm.rate_playlist(
+                        self._ytm.get_album(
+                            album['browseId']
+                        )['playlistId'], 'LIKE'
                     )
                     return
 
-    def spotifyAdd(title, artists):
-        for album in sp.search(type="album", q=html.escape(title), limit=50)['albums']['items']:
+    def _spotifyAddAlbum(self, title, artists):
+        for album in self._sp.search(type="album", q=html.escape(title), limit=50)['albums']['items']:
             for artist in album['artists']:
                 if artist['name'] in artists:
-                    sp.current_user_saved_albums_add([album['id']])
+                    self._sp.current_user_saved_albums_add([album['id']])
                     return
-    
-    items.sync(ytAdd, spotifyAdd)
 
+    def sync(self, spotify, ytmusic, sync_target):
+        for album in self._paginationHelper(self._sp.current_user_saved_albums()):
+            self._processAlbum(album['album'], "spotify")
+
+        for album in self._ytm.get_library_albums(limit=1000):
+            self._processAlbum(album, "ytmusic")
+
+        for _item in self._items:
+            if 'albums' in sync_target:
+                if not _item.getPlatforms()['ytmusic'] and spotify:
+                    self._ytmAddAlbum(_item.getTitle(), _item.getArtists())
+                elif not _item.getPlatforms()['spotify'] and ytmusic:
+                    self._spotifyAddAlbum(_item.getTitle(), _item.getArtists())
+
+
+def main(ytheaders, spotify_client_id, spotify_client_secret, spotify, ytmusic, sync_target):
+    spotube = Spotube(ytheaders, spotify_client_id, spotify_client_secret)
+    spotube.sync(spotify, ytmusic, sync_target)
     quit()
 
 if __name__ == "__main__":
