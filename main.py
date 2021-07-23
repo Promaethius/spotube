@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-from ytmusicapi import YTMusic
+from ytmusicapi import YTMusic, ytmusic
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import html, click, time
@@ -79,9 +79,29 @@ class Song:
     def setPlatform(self, platform):
         _setPlatform(self,platform)
 
+class Playlist:
+    def __init__(self, item, platform) -> None:
+        self._title = ""
+        self.songs = []
+        self._platform = {
+            'ytmusic': False,
+            'spotify': False
+        }
+
+        self.title = _titleHelper(item)
+
+        self.setPlatform(platform)
+        pass
+
+    def setPlatform(self, platform):
+        _setPlatform(self,platform)
+    def getTitle(self):
+        return self._title
+
 class Spotube:
     def __init__(self, ytheaders, spotify_client_id, spotify_client_secret) -> None:
         self._items = []
+        self._playlists = []
         self._ytm = YTMusic('./request_headers.json'
             if os.path.isfile('./request_headers.json') else ytheaders)
         self._sp = spotipy.Spotify(
@@ -89,19 +109,19 @@ class Spotube:
                 client_id=spotify_client_id,
                 client_secret=spotify_client_secret,
                 redirect_uri="http://localhost:8080",
-                scope="user-library-modify,user-library-read"
+                scope="user-library-modify,user-library-read,playlist-read-private,playlist-read-collaborative,playlist-modify-public,playlist-modify-private"
             )
         )
         logger.info("Spotube initialized.")
         pass
 
-    def _paginationHelper(self, spotifyFunction):
-        results = spotifyFunction()
-        albums = results['items']
+    def _paginationHelper(self, spotifyFunction, *args):
+        results = spotifyFunction(*args)
+        items = results['items']
         while results['next']:
             results = self._sp.next(results)
-            albums.extend(results['items'])
-        return albums
+            items.extend(results['items'])
+        return items
     
     def _processAlbum(self, item, platform):
         def exists():
@@ -141,6 +161,46 @@ class Spotube:
             self._items.append(
                 Song(item, platform)
             )
+
+    def _processPlaylist(self, item, platform):
+        def _spotifyTrackHelper(items):
+            cleaned = []
+            for item in items:
+                cleaned.append(
+                    item['track']
+                )
+            return cleaned
+        songs = (self._ytm.get_playlist(item['playlistId'])['tracks'] if platform == 'ytmusic' else
+            (_spotifyTrackHelper(self._paginationHelper(self._sp.playlist_items, item['id'])) if platform =='spotify' else []))
+        def exists():
+            for _playlist in self._playlists:
+                if _titleHelper(item) == _playlist.getTitle():
+                    for song in songs:
+                        for _song in _playlist.songs:
+                            if _titleHelper(song) == _song.getTitle():
+                                for artist in song['artists']:
+                                    if _titleHelper(artist) in _song.getArtists():
+                                        logger.info("Song: {} exists in Playlist {} on {}.".format(_titleHelper(song), _playlist.getTitle(), platform))
+                                        _song.setPlatform(platform)
+                                        return True
+                        logger.info("Playlist {} exists but song {} does not on {}.".format(_playlist.getTitle(), _titleHelper(song), platform))
+                        _playlist.songs.append(
+                            Song(song, platform)
+                        )
+                        return True
+            return False
+        if not exists():
+            logger.info("Playlist {} exists on {}. Adding to process stack.".format(_titleHelper(item), platform))
+            playlist = Playlist(
+                item, platform
+            )
+            for song in songs:
+                logger.info("Adding song {} to playlist {} on {}.".format(_titleHelper(song), _titleHelper(item), platform))
+                playlist.songs.append(
+                    Song(song, platform)
+                )
+            self._playlists.append(playlist)
+        return
 
     def _ytmAddAlbum(self, item, dryrun):
         for album in self._ytm.search(query=item.getTitle(), filter="albums", limit=50):
@@ -188,17 +248,23 @@ class Spotube:
                     else:
                         logger.info("DRYRUN: current_user_saved_tracks_add ID: {} ".format(song['id']))                    
                     return
+    
+    def _ytmModifyPlaylist(self, item, dryrun):
+        return
+
+    def _spotifyModifyPlaylist(self, item, dryrun):
+        return
 
     def sync(self, spotify, ytmusic, sync_target, threads, dryrun):
-        logger.info("Processing albums...")
         if 'albums' in sync_target:
+            logger.info("Processing albums...")
             with cf.ThreadPoolExecutor(max_workers=threads) as executor:
                 for album in self._paginationHelper(self._sp.current_user_saved_albums):
                     executor.submit(self._processAlbum, album['album'], "spotify")
                 for album in self._ytm.get_library_albums(limit=1000):
                     executor.submit(self._processAlbum, album, "ytmusic")
-        logger.info("Processing songs...")
         if 'songs' in sync_target:
+            logger.info("Processing songs...")
             with cf.ThreadPoolExecutor(max_workers=threads) as executor:
                 for song in self._paginationHelper(self._sp.current_user_saved_tracks):
                     executor.submit(self._processSong, song['track'], "spotify")
@@ -217,6 +283,20 @@ class Spotube:
                         executor.submit(self._ytmAddSong, _item, dryrun)
                     if not _item.getPlatforms()['spotify'] and ytmusic:
                         executor.submit(self._spotifyAddSong, _item, dryrun)
+
+        if 'playlists' in sync_target:
+            logger.info("Processing playlists...")
+            with cf.ThreadPoolExecutor(max_workers=threads) as executor:
+                for playlist in self._paginationHelper(self._sp.current_user_playlists):
+                    executor.submit(self._processPlaylist, playlist, "spotify")
+                for playlist in self._ytm.get_library_playlists(limit=1000):
+                    executor.submit(self._processPlaylist, playlist, "ytmusic")
+            with cf.ThreadPoolExecutor(max_workers=threads) as executor:
+                for playlist in self._playlists:
+                    if spotify:
+                        executor.submit(self._ytmModifyPlaylist, _item, dryrun)
+                    if ytmusic:
+                        executor.submit(self._spotifyModifyPlaylist, _item, dryrun)
 
 @click.command()
 @click.option('--ytheaders', prompt='Paste YouTube Music request headers',
