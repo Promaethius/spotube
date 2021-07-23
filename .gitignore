@@ -112,3 +112,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# YTMusic API
+request_headers.json
+
+# VSCode
+.vscode
