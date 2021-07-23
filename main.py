@@ -2,7 +2,7 @@
 from ytmusicapi import YTMusic
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import html, click
+import html, click, time
 import concurrent.futures as cf
 import logging, os.path
 
@@ -226,12 +226,20 @@ class Spotube:
 @click.option('--spotify/--no-spotify', default=True, help='Controls if Spotify will be synced to. Default: True')
 @click.option('--ytmusic/--no-ytmusic', default=True, help='Controls if YouTube Music will be synced to. Default: True')
 @click.option('--sync_target', default=['albums'], help='Targets item types to sync. Currently supported are albums, songs, and playlists. Multiple instances of this command are allowed.', multiple=True)
+@click.option('--quiet', default=False, help='Disables logger INFO output. Useful alongside "--timer"')
+@click.option('--timer', default=0, help='Advanced Command. Specifies the number of seconds between syncs. Set to a number above 0 to enable.')
 @click.option('--threads', default=5, help='Advanced Command. Specifies the number of async-threads to use when fetching items and syncing.')
 @click.option('--dryrun', is_flag=True, help='Advanced Command. Outputs additions instead of performing them.')
-def main(ytheaders, spotify_client_id, spotify_client_secret, spotify, ytmusic, sync_target, threads, dryrun):
-    logging.basicConfig(level = logging.INFO)
+def main(ytheaders, spotify_client_id, spotify_client_secret, spotify, ytmusic, sync_target, quiet, timer, threads, dryrun):
+    if not quiet:
+        logging.basicConfig(level = logging.INFO)
     spotube = Spotube(ytheaders, spotify_client_id, spotify_client_secret)
-    spotube.sync(spotify, ytmusic, sync_target, threads, dryrun)
+    while True:
+        spotube.sync(spotify, ytmusic, sync_target, threads, dryrun)
+        if timer > 0:
+            time.sleep(timer)
+        else:
+            break
     quit()
 
 if __name__ == "__main__":
