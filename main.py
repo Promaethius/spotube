@@ -84,19 +84,25 @@ class Playlist:
         self._title = ""
         self.songs = []
         self._platform = {
-            'ytmusic': False,
-            'spotify': False
+            'ytmusic': '',
+            'spotify': ''
         }
 
-        self.title = _titleHelper(item)
-
-        self.setPlatform(platform)
+        self._title = _titleHelper(item)
+        self.setPlatform(item, platform)
         pass
 
-    def setPlatform(self, platform):
-        _setPlatform(self,platform)
     def getTitle(self):
         return self._title
+    def getPlatforms(self):
+        return self._platform
+    def setPlatform(self, item, platform):
+        if platform == 'spotify':
+            self.setPlatformId(item['id'], platform)
+        elif platform == 'ytmusic':
+            self.setPlatformId(item['playlistId'], platform)
+    def setPlatformId(self, id, platform):
+        self._platform[platform] = id
 
 class Spotube:
     def __init__(self, ytheaders, spotify_client_id, spotify_client_secret) -> None:
@@ -109,7 +115,7 @@ class Spotube:
                 client_id=spotify_client_id,
                 client_secret=spotify_client_secret,
                 redirect_uri="http://localhost:8080",
-                scope="user-library-modify,user-library-read,playlist-read-private,playlist-read-collaborative,playlist-modify-public,playlist-modify-private"
+                scope="user-library-modify,user-library-read,playlist-read-private,playlist-read-collaborative,playlist-modify-public,playlist-modify-private,user-read-private,user-read-email"
             )
         )
         logger.info("Spotube initialized.")
@@ -181,13 +187,13 @@ class Spotube:
                                 for artist in song['artists']:
                                     if _titleHelper(artist) in _song.getArtists():
                                         logger.info("Song: {} exists in Playlist {} on {}.".format(_titleHelper(song), _playlist.getTitle(), platform))
-                                        _song.setPlatform(platform)
+                                        _song.setPlatform(item, platform)
                                         return True
                         logger.info("Playlist {} exists but song {} does not on {}.".format(_playlist.getTitle(), _titleHelper(song), platform))
                         _playlist.songs.append(
                             Song(song, platform)
                         )
-                        return True
+                    return True
             return False
         if not exists():
             logger.info("Playlist {} exists on {}. Adding to process stack.".format(_titleHelper(item), platform))
@@ -222,13 +228,11 @@ class Spotube:
                     if not dryrun:
                         self._sp.current_user_saved_albums_add([album['id']])
                     else:
-                        logger.info("DRYRUN: current_user_saved_albums_add ID: {} ".format(album['id']))                    
+                        logger.info("DRYRUN: current_user_saved_albums_add ID: {}".format(album['id']))                    
                     return
     
     def _ytmAddSong(self, item, dryrun):
         for song in self._ytm.search(query=item.getTitle(), filter="songs", limit=50):
-            if 'feedbackTokens' not in song.keys():
-                continue
             for artist in song['artists']:
                 if artist['name'] in item.getArtists():
                     logger.info("Adding song {} to YouTube Music.".format(item.getTitle()))
@@ -246,14 +250,57 @@ class Spotube:
                     if not dryrun:
                         self._sp.current_user_saved_tracks_add([song['id']])
                     else:
-                        logger.info("DRYRUN: current_user_saved_tracks_add ID: {} ".format(song['id']))                    
+                        logger.info("DRYRUN: current_user_saved_tracks_add ID: {}".format(song['id']))                    
                     return
     
-    def _ytmModifyPlaylist(self, item, dryrun):
+    def _ytmAddPlaylist(self, playlist, dryrun):
+        logger.info("Creating playlist {} on YouTube Music.".format(playlist.getTitle()))
+        if not dryrun:
+            playlist.setPlatformId(
+                self._ytm.create_playlist(
+                    title=playlist.getTitle(),
+                    description="Imported."
+                ), 'ytmusic'
+            )
+        else:
+            logger.info("DRYRUN: create_playlist {}".format(playlist.getTitle()))
         return
 
-    def _spotifyModifyPlaylist(self, item, dryrun):
+    def _spotifyAddPlaylist(self, playlist, dryrun):
+        logger.info("Creating playlist {} on Spotify.".format(playlist.getTitle()))
+        if not dryrun:
+            playlist.setPlatformId(
+                self._sp.user_playlist_create(
+                    user=self._sp.current_user()['id'],
+                    name=playlist.getTitle()
+                ), 'spotify'
+            )
+            self._sp.user_playlist_create()
+        else:
+            logger.info("DRYRUN: create_playlist {}".format(playlist.getTitle()))
         return
+    
+    def _ytmAddPlaylistSong(self, playlist, item, dryrun):
+        for song in self._ytm.search(query=item.getTitle(), filter="songs", limit=50):
+            for artist in song['artists']:
+                if artist['name'] in item.getArtists():
+                    logger.info("Adding song {} to playlist {} in YouTube Music.".format(_titleHelper(song), playlist.getTitle()))
+                    if not dryrun:
+                        self._ytm.add_playlist_items(playlist.getPlatforms['ytmusic'], [song['videoId']])
+                    else:
+                        logger.info("DRYRUN: add_playlist_items ID: {} Song: {}".format(playlist.getPlatforms['ytmusic'], [song['videoId']]))
+                    return
+
+    def _spotifyAddPlaylistSong(self, playlist, item, dryrun):
+        for song in self._sp.search(type="track", q=html.escape(item.getTitle()), limit=50)['tracks']['items']:
+            for artist in song['artists']:
+                if artist['name'] in item.getArtists():
+                    logger.info("Adding song {} to playlist {} in Spotify.".format(_titleHelper(song), playlist.getTitle()))
+                    if not dryrun:
+                        self._sp.playlist_add_items(playlist.getPlatforms['spotify'], [song['id']])
+                    else:
+                        logger.info("DRYRUN: playlist_add_items ID: {} Playlist: {}".format(playlist.getPlatforms['spotify'], [song['id']]))                    
+                    return
 
     def sync(self, spotify, ytmusic, sync_target, threads, dryrun):
         if 'albums' in sync_target:
@@ -263,6 +310,7 @@ class Spotube:
                     executor.submit(self._processAlbum, album['album'], "spotify")
                 for album in self._ytm.get_library_albums(limit=1000):
                     executor.submit(self._processAlbum, album, "ytmusic")
+                executor.shutdown(wait=True)
         if 'songs' in sync_target:
             logger.info("Processing songs...")
             with cf.ThreadPoolExecutor(max_workers=threads) as executor:
@@ -270,19 +318,21 @@ class Spotube:
                     executor.submit(self._processSong, song['track'], "spotify")
                 for song in self._ytm.get_library_songs(limit=1000):
                     executor.submit(self._processSong, song, "ytmusic")
+                executor.shutdown(wait=True)
 
         with cf.ThreadPoolExecutor(max_workers=threads) as executor:
             for _item in self._items:
                 if isinstance(_item, Album) and 'albums' in sync_target:
-                    if not _item.getPlatforms()['ytmusic'] and spotify:
+                    if not _item.getPlatforms()['ytmusic'] and ytmusic:
                         executor.submit(self._ytmAddAlbum, _item, dryrun)
-                    elif not _item.getPlatforms()['spotify'] and ytmusic:
+                    elif not _item.getPlatforms()['spotify'] and spotify:
                         executor.submit(self._spotifyAddAlbum, _item, dryrun)
                 elif isinstance(_item, Song):
-                    if not _item.getPlatforms()['ytmusic'] and spotify:
+                    if not _item.getPlatforms()['ytmusic'] and ytmusic:
                         executor.submit(self._ytmAddSong, _item, dryrun)
-                    if not _item.getPlatforms()['spotify'] and ytmusic:
+                    if not _item.getPlatforms()['spotify'] and spotify:
                         executor.submit(self._spotifyAddSong, _item, dryrun)
+            executor.shutdown(wait=True)
 
         if 'playlists' in sync_target:
             logger.info("Processing playlists...")
@@ -291,12 +341,24 @@ class Spotube:
                     executor.submit(self._processPlaylist, playlist, "spotify")
                 for playlist in self._ytm.get_library_playlists(limit=1000):
                     executor.submit(self._processPlaylist, playlist, "ytmusic")
+                executor.shutdown(wait=True)
             with cf.ThreadPoolExecutor(max_workers=threads) as executor:
                 for playlist in self._playlists:
-                    if spotify:
-                        executor.submit(self._ytmModifyPlaylist, _item, dryrun)
-                    if ytmusic:
-                        executor.submit(self._spotifyModifyPlaylist, _item, dryrun)
+                    if playlist.getPlatforms()['spotify'] == '' and spotify:
+                        executor.submit(self._spotifyAddPlaylist, playlist, dryrun)
+                    if playlist.getPlatforms()['ytmusic'] == '' and ytmusic:
+                        executor.submit(self._ytmAddPlaylist, playlist, dryrun)
+                executor.shutdown(wait=True)
+            with cf.ThreadPoolExecutor(max_workers=threads) as executor:
+                for playlist in self._playlists:
+                    for song in playlist.songs:
+                        if playlist.getPlatforms()['spotify'] != '' and not song.getPlatforms()['spotify'] and spotify:
+                            executor.submit(self._spotifyAddPlaylistSong, playlist, song, dryrun)
+                        if playlist.getPlatforms()['ytmusic'] != '' and not song.getPlatforms()['ytmusic'] and ytmusic:
+                            executor.submit(self._ytmAddPlaylistSong, playlist, song, dryrun)
+                executor.shutdown(wait=True)
+
+        return
 
 @click.command()
 @click.option('--ytheaders', prompt='Paste YouTube Music request headers',
